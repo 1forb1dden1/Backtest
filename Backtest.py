@@ -1,6 +1,8 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 
+import pandas as pd
+
 class DataLoader:
     def __init__(self, file_path):
         self.file_path = file_path
@@ -8,17 +10,26 @@ class DataLoader:
     def load_data(self):
         try:
             data = pd.read_csv(self.file_path)
-            data['Close/Last'] = data['Close/Last'].str.replace('$', '').str.replace(',', '').astype(float)
-            data['Open'] = data['Open'].str.replace('$', '').str.replace(',', '').astype(float)
-            data['High'] = data['High'].str.replace('$', '').str.replace(',', '').astype(float)
-            data['Low'] = data['Low'].str.replace('$', '').str.replace(',', '').astype(float)
-            data['Volume'] = data['Volume'].astype(int)
-            data['Date'] = pd.to_datetime(data['Date'])
-            data.set_index('Date', inplace=True)
+
+            # Process columns only if they contain strings (for SPY data with $ signs)
+            for col in ['Close/Last', 'Open', 'High', 'Low']:
+                if col in data.columns and data[col].dtype == object:
+                    data[col] = data[col].str.replace('$', '').str.replace(',', '').astype(float)
+
+            # Convert 'Volume' to integer if it's not N/A
+            if 'Volume' in data.columns:
+                data['Volume'] = pd.to_numeric(data['Volume'], errors='coerce').fillna(0).astype(int)
+
+            # Convert 'Date' to datetime and set it as the index
+            if 'Date' in data.columns:
+                data['Date'] = pd.to_datetime(data['Date'])
+                data.set_index('Date', inplace=True)
+
             return data
         except Exception as e:
             print(f"Error loading data: {e}")
             return None
+
 
 class Strategy:
     def __init__(self):
@@ -75,59 +86,101 @@ class Backtest:
         self.position = None 
         self.shares = 0
         self.net_worth_history = []
+        self.buy_price = 0
 
+    def handle_buy_order(self, rsi_value, current_price, timestamp, net_worth):
+        # Buying logic
+        self.position = 'buy'
+        self.shares = float(self.balance / current_price)
+        self.balance -= self.shares * current_price
+        self.balance = round(self.balance, 2)
+        self.buy_price = current_price
+        self.results.append((timestamp, 'Buy', round(rsi_value, 2), current_price, self.shares, self.balance, round(net_worth, 2)))
+
+    def handle_sell_order(self, rsi_value, current_price, timestamp, net_worth):
+        # Selling logic
+        self.position = None
+        self.balance += self.shares * current_price
+        self.balance = round(self.balance, 2)
+        self.shares = 0
+        self.buy_price = 0
+        self.results.append((timestamp, 'Sell', round(rsi_value, 2), current_price, self.shares, self.balance, round(net_worth, 2)))
     def run(self):
-        # Check if lengths of signals_df and data are compatible
+
         if len(self.strategy.signals_df) != len(self.data['Close/Last']):
             raise ValueError("The length of signals_df and data must be the same.")
 
         print("Timestamp, Buy/Sell, RSI Value, Current Price, Total Shares Owned, Current Balance, Net Portfolio")
-        
+        x = 1
         for i in range(len(self.strategy.signals_df) - 1, -1, -1):
             rsi_value = self.strategy.signals_df['RSI'].iloc[i]
             current_price = self.data['Close/Last'].iloc[i]
-
+            timestamp = self.strategy.signals_df['timestamp'].iloc[i]
+            x = x+1
             # Calculate the current balance based on shares held
             net_worth = self.balance + (self.shares * current_price)
-            self.net_worth_history.append(round(net_worth, 2))  # Store current balance
+
+            self.net_worth_history.append(net_worth)  # Store current balance
 
 
             if rsi_value < 20 and self.position is None and self.balance >= current_price:
-                # Buy signal
-                self.position = 'buy'
-                self.shares = int(self.balance / current_price)
-                self.balance -= self.shares * current_price
-                self.balance = round(self.balance, 2)
-                self.results.append((self.strategy.signals_df['timestamp'].iloc[i], 'Buy', round(rsi_value, 2), current_price, self.shares, self.balance, round(net_worth, 2)))
+                self.handle_buy_order(rsi_value, current_price, timestamp, net_worth)
 
-            elif rsi_value > 85 and self.position == 'buy':
-                # Sell signal
-                self.position = None
-                self.balance += self.shares * current_price
-                self.balance = round(self.balance, 2)
-                self.shares = 0
-                self.results.append((self.strategy.signals_df['timestamp'].iloc[i], 'Sell', round(rsi_value, 2), current_price, self.shares, self.balance, round(net_worth, 2)))
+            
+            elif rsi_value > 70 and self.position == 'buy':
+                # RSI Sell Signal
+                self.handle_sell_order(rsi_value, current_price, timestamp, net_worth)
+
+            elif current_price > 1.02 * self.buy_price and self.position == 'buy':
+                # take profit 2%
+                self.handle_sell_order(rsi_value, current_price, timestamp, net_worth)
+            elif current_price < 0.98 * self.buy_price and self.position == 'buy':
+                # stop loss 2%
+                self.handle_sell_order(rsi_value, current_price, timestamp, net_worth)
+
         return self.results
 
-
     def plot_portfolio(self):
-        
         if len(self.net_worth_history) > len(self.strategy.signals_df['timestamp']):
             self.net_worth_history = self.net_worth_history[:-1]  # Remove the last element
 
         plotItem = self.net_worth_history
         plotItem.reverse()
 
+        # Prepare lists for buy and sell points
+        buy_points = []
+        buy_timestamps = []
+        sell_points = []
+        sell_timestamps = []
+
+        for result in self.results:
+            timestamp, action, net_worth = result
+            if action == 'Buy':
+                buy_points.append(net_worth)
+                buy_timestamps.append(timestamp)
+            elif action == 'Sell':
+                sell_points.append(net_worth)
+                sell_timestamps.append(timestamp)
+
         plt.figure(figsize=(14, 8))
         plt.plot(self.strategy.signals_df['timestamp'], plotItem, label='Portfolio Balance', color='Black')
+
+        if buy_points and buy_timestamps:
+            plt.scatter(buy_timestamps, buy_points, color='green', marker='^', s=100, label='Buy')
+
+        if sell_points and sell_timestamps:
+            plt.scatter(sell_timestamps, sell_points, color='red', marker='v', s=100, label='Sell')
+
+        # Formatting the plot
         plt.xlabel('Date')
         plt.ylabel('Balance (USD)')
-        plt.title('Portfolio Balance Over Time')
+        plt.title('Portfolio Balance Over Time with Buy/Sell Points')
         plt.xticks(rotation=45)
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
         plt.show()
+
 
 
 
@@ -146,13 +199,13 @@ def plot_stock_prices(df):
 
 
 # Main execution
-data_loader = DataLoader('SPY.csv')
+data_loader = DataLoader('AT&T.csv')
 data = data_loader.load_data()
 
-if data is not None:  # Check if data loaded successfully
+if data is not None: 
     strategy = Strategy()
-    strategy.generate_percentage_change(data)  # Generate percentage changes
-    strategy.calculate_rsi(window=14)  # Calculate RSI
+    strategy.generate_percentage_change(data)
+    strategy.calculate_rsi(window=14)
 
     backtest = Backtest(data, strategy, 10000)
     results = backtest.run()
